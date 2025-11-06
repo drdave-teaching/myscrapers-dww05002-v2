@@ -85,10 +85,34 @@ jobs:
             --gen2 --region="${REGION}" \
             --member="serviceAccount:${{ vars.DEPLOYER_SA }}"
 
-      - name: Ensure Scheduler API enabled
-        run: gcloud services enable cloudscheduler.googleapis.com
+      # ---- NEW: Pre-check Cloud Scheduler API; skip job creation if not enabled and we lack perms
+      - name: Ensure Scheduler API enabled (pre-check)
+        id: apicheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud config set project "${PROJECT_ID}" >/dev/null
+          if gcloud services list --enabled \
+               --filter="config.name=cloudscheduler.googleapis.com" \
+               --format="value(config.name)" | grep -q cloudscheduler.googleapis.com; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Cloud Scheduler API already enabled."
+          else
+            echo "Cloud Scheduler API not enabled. Attempting to enable..."
+            if gcloud services enable cloudscheduler.googleapis.com; then
+              echo "enabled=true" >> "$GITHUB_OUTPUT"
+              echo "✅ Enabled Cloud Scheduler API."
+            else
+              echo "enabled=false" >> "$GITHUB_OUTPUT"
+              echo "❌ Could not enable Cloud Scheduler API with current SA."
+              echo "Grant roles/serviceusage.serviceUsageAdmin and roles/cloudscheduler.admin to ${{ vars.DEPLOYER_SA }},"
+              echo "or enable the API once manually:"
+              echo "  gcloud services enable cloudscheduler.googleapis.com --project='${PROJECT_ID}'"
+            fi
+          fi
 
       - name: Create/Update Cloud Scheduler job (:10)
+        if: steps.apicheck.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
