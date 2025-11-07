@@ -1,4 +1,5 @@
 name: Deploy Scraper (CF Gen2 + Cloud Scheduler)
+run-name: "Scraper deploy by ${{ github.actor }} • ${{ github.ref_name }}"
 
 on:
   push:
@@ -24,7 +25,7 @@ env:
   DEPLOYER_SA: ${{ vars.DEPLOYER_SA }}
   WORKLOAD_IDENTITY_PROVIDER: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
   SCHEDULE_BODY: ${{ vars.SCHEDULE_BODY || '{"pages":1,"max":3}' }}
-  CRON_EXPR: "0 * * * *"              # :00 every hour (ET below)
+  CRON_EXPR: "0 * * * *"         # :00 every hour; America/New_York set below
 
 jobs:
   deploy:
@@ -44,16 +45,6 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ env.PROJECT_ID }}
-
-      - name: Echo config
-        run: |
-          echo "PROJECT_ID=${PROJECT_ID}"
-          echo "REGION=${REGION}"
-          echo "FUNCTION_NAME=${FUNCTION_NAME}"
-          echo "FUNCTION_DIR=${FUNCTION_DIR}"
-          echo "ENTRY_POINT=${ENTRY_POINT}"
-          echo "RUNTIME_SA=${RUNTIME_SA}"
-          echo "DEPLOYER_SA=${DEPLOYER_SA}"
 
       - name: Deploy Cloud Function (Gen2, HTTP, authenticated)
         run: |
@@ -76,52 +67,64 @@ jobs:
             --memory=512Mi \
             --timeout=540s
 
-      - name: Grant invoker to deployer SA
+      - name: Grant invoker to deployer & runtime SAs
         run: |
           gcloud functions add-invoker-policy-binding "${FUNCTION_NAME}" \
             --gen2 --region "${REGION}" \
             --member="serviceAccount:${DEPLOYER_SA}"
+          gcloud functions add-invoker-policy-binding "${FUNCTION_NAME}" \
+            --gen2 --region "${REGION}" \
+            --member="serviceAccount:${RUNTIME_SA}"
 
       - name: Get Function URL
         id: cfurl
         run: |
           URL=$(gcloud functions describe "${FUNCTION_NAME}" --gen2 --region "${REGION}" --format='value(serviceConfig.uri)')
           echo "url=${URL}" >> "$GITHUB_OUTPUT"
-          echo "FUNCTION_URL=${URL}"
 
-      - name: Ensure Scheduler API enabled (fail clearly if not)
-        id: apicheck
-        shell: bash
+      - name: Ensure Scheduler API enabled
         run: |
           set -euo pipefail
-          if gcloud services list --enabled --filter="cloudscheduler.googleapis.com" --format="value(config.name)" | grep -q cloudscheduler.googleapis.com; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            if gcloud services enable cloudscheduler.googleapis.com; then
-              echo "enabled=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "Cloud Scheduler API enable failed. Grant roles/serviceusage.serviceUsageAdmin to ${DEPLOYER_SA} or enable manually."
-              exit 1
-            fi
+          gcloud services list --enabled --filter="cloudscheduler.googleapis.com" --format="value(config.name)" | grep -q cloudscheduler.googleapis.com \
+            || gcloud services enable cloudscheduler.googleapis.com
+
+      # These two bindings are REQUIRED for Cloud Scheduler OIDC using RUNTIME_SA
+      - name: Bootstrap IAM for Scheduler OIDC (runtime SA)
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUNTIME_SA:-}" ]]; then
+            echo "RUNTIME_SA is empty; set repo var RUNTIME_SA to your runtime service account."; exit 1
           fi
-
-      - name: Ensure Scheduler can mint OIDC as deployer SA (tokenCreator)
-        run: |
-          set -euo pipefail
           PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')"
           SCHED_AGENT="service-${PROJECT_NUMBER}@gcp-sa-cloudscheduler.iam.gserviceaccount.com"
           echo "Scheduler agent: ${SCHED_AGENT}"
-          gcloud iam service-accounts add-iam-policy-binding "${DEPLOYER_SA}" \
-            --member="serviceAccount:${SCHED_AGENT}" \
-            --role="roles/iam.serviceAccountTokenCreator"
 
-      - name: Create/Update Cloud Scheduler job (:00 ET)
+          # 1) Let Scheduler mint OIDC tokens as the RUNTIME_SA
+          gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SA}" \
+            --member="serviceAccount:${SCHED_AGENT}" \
+            --role="roles/iam.serviceAccountTokenCreator" || {
+              echo "::error::Permission denied adding tokenCreator to ${RUNTIME_SA}. Run (once as project owner):
+gcloud iam service-accounts add-iam-policy-binding \"${RUNTIME_SA}\" --member=\"serviceAccount:${SCHED_AGENT}\" --role=\"roles/iam.serviceAccountTokenCreator\""
+              exit 1
+          }
+
+          # 2) Allow the deployer SA to 'actAs' the RUNTIME_SA when creating the job
+          gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SA}" \
+            --member="serviceAccount:${DEPLOYER_SA}" \
+            --role="roles/iam.serviceAccountUser" || {
+              echo "::error::Permission denied adding ServiceAccountUser for ${DEPLOYER_SA} on ${RUNTIME_SA}. Run:
+gcloud iam service-accounts add-iam-policy-binding \"${RUNTIME_SA}\" --member=\"serviceAccount:${DEPLOYER_SA}\" --role=\"roles/iam.serviceAccountUser\""
+              exit 1
+          }
+
+      - name: Create/Update Cloud Scheduler job (:00 ET, uses runtime SA OIDC)
         shell: bash
         run: |
           set -euo pipefail
           JOB_NAME="${FUNCTION_NAME}-hourly"
           URL="${{ steps.cfurl.outputs.url }}"
           [[ -z "${URL}" ]] && { echo "Function URL empty"; exit 1; }
+
           if gcloud scheduler jobs describe "$JOB_NAME" --location="${REGION}" >/dev/null 2>&1; then
             gcloud scheduler jobs update http "$JOB_NAME" \
               --location="${REGION}" \
@@ -130,7 +133,7 @@ jobs:
               --uri="${URL}" \
               --http-method=POST \
               --message-body='${{ env.SCHEDULE_BODY }}' \
-              --oidc-service-account-email="${DEPLOYER_SA}" \
+              --oidc-service-account-email="${RUNTIME_SA}" \
               --oidc-token-audience="${URL}"
           else
             gcloud scheduler jobs create http "$JOB_NAME" \
@@ -140,6 +143,6 @@ jobs:
               --uri="${URL}" \
               --http-method=POST \
               --message-body='${{ env.SCHEDULE_BODY }}' \
-              --oidc-service-account-email="${DEPLOYER_SA}" \
+              --oidc-service-account-email="${RUNTIME_SA}" \
               --oidc-token-audience="${URL}"
           fi
