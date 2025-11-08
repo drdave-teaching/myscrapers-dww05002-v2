@@ -3,8 +3,11 @@
 # fetches the original TXT, asks an LLM (Vertex AI) to extract fields, and writes
 # a sibling "<post_id>_llm.jsonl" to the NEW 'jsonl_llm/' sub-directory.
 #
-# NEW Output Path:
-# gs://<bucket>/<STRUCTURED_PREFIX>/run_id=<RUN>/jsonl_llm/<post_id>_llm.jsonl
+# Robustness changes:
+# 1. Caches the GenerativeModel object.
+# 2. Implements retry/exponential backoff for transient GCS and LLM API errors.
+# 3. FIX: Corrects prompt construction to eliminate AttributeError.
+# 4. NOTE: Uses gemini-2.5-flash by default for better memory performance.
 
 import os
 import re
@@ -29,11 +32,12 @@ REGION             = os.getenv("REGION", "us-central1")
 BUCKET_NAME        = os.getenv("GCS_BUCKET", "")
 STRUCTURED_PREFIX  = os.getenv("STRUCTURED_PREFIX", "structured")
 LLM_PROVIDER       = os.getenv("LLM_PROVIDER", "vertex").lower()
-LLM_MODEL          = os.getenv("LLM_MODEL", "gemini-1.5-flash")
+# Using gemini-2.5-flash as default to address potential memory issues
+LLM_MODEL          = os.getenv("LLM_MODEL", "gemini-2.5-flash") 
 OVERWRITE_DEFAULT  = os.getenv("OVERWRITE", "false").lower() == "true"
-MAX_FILES_DEFAULT  = int(os.getenv("MAX_FILES", "0") or 0)  # 0 = all
+MAX_FILES_DEFAULT  = int(os.getenv("MAX_FILES", "0") or 0)
 
-# GCS READ RETRY
+# GCS READ RETRY - Use default transient error logic
 READ_RETRY = gax_retry.Retry(
     predicate=gax_retry.if_transient_error,
     initial=1.0, maximum=10.0, multiplier=2.0, deadline=120.0
@@ -118,7 +122,6 @@ def _list_per_listing_jsonl_for_run(bucket: str, run_id: str) -> list[str]:
     for b in bucket_obj.list_blobs(prefix=prefix):
         if not b.name.endswith(".jsonl"):
             continue
-        # We no longer need to check for '_llm.jsonl' here since outputs are in a different dir
         names.append(b.name)
     return names
 
@@ -179,10 +182,12 @@ def _vertex_extract_fields(raw_text: str) -> dict:
         "do not infer values not explicitly present; do not add extra keys."
     )
 
-    prompt_content = [Content(role="user", parts=[f"TEXT:\n{raw_text}",])]
+    # 💥 FIX: Prompt is now a simple string containing the text to be processed.
+    prompt = f"TEXT:\n{raw_text}"
 
     gen_cfg = GenerationConfig(
-        system_instruction=sys_instr,
+        # System instruction is used here, separate from the prompt data (best practice)
+        system_instruction=sys_instr, 
         temperature=0.0,
         top_p=1.0,
         top_k=40,
@@ -196,7 +201,8 @@ def _vertex_extract_fields(raw_text: str) -> dict:
     resp = None
     for attempt in range(max_attempts):
         try:
-            resp = model.generate_content(prompt_content, generation_config=gen_cfg)
+            # Pass the simple string prompt
+            resp = model.generate_content(prompt, generation_config=gen_cfg)
             break
         except Exception as e:
             if not _if_llm_retryable(e) or attempt == max_attempts - 1:
@@ -288,12 +294,9 @@ def llm_extract_http(request: Request):
             if not source_txt_key:
                 raise ValueError("missing source_txt in input record")
 
-            # --- KEY CHANGE: Calculate new output path using 'jsonl_llm/' ---
-            # in_key example: structured/run_id=.../jsonl/123.jsonl
-            # out_prefix: structured/run_id=.../jsonl_llm
+            # Output path: uses 'jsonl_llm/' folder
             out_prefix = in_key.rsplit("/", 2)[0] + "/jsonl_llm"
             out_key = out_prefix + f"/{post_id}_llm.jsonl"
-            # --- END KEY CHANGE ---
 
             if not overwrite and _blob_exists(out_key):
                 skipped += 1
