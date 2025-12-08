@@ -1,4 +1,4 @@
-name: Data Sync Hourly Predictions to Repo
+name: Data Sync: Hourly Predictions to Repo
 run-name: Syncing hourly predictions for ${{ github.ref_name }} by @${{ github.actor }} 
 on:
   schedule:
@@ -25,6 +25,9 @@ jobs:
       # --- 1. SETUP & AUTHENTICATION ---
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          # FIX: Explicitly grant the GITHUB_TOKEN write access for push/rebase
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Auth (WIF) and Setup gcloud
         uses: google-github-actions/auth@v2
@@ -82,7 +85,7 @@ jobs:
           # Commit the new file
           git commit -m "🤖 Data Sync: Add hourly prediction file for run $RUN_ID"
           
-          # 🚨 FIX for "rejected" error: Pull the latest remote changes and rebase
+          # FIX 2: Pull the latest remote changes and rebase to resolve 'rejected' error
           git pull --rebase origin main 
           
           # Push the changes
