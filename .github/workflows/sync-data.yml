@@ -1,14 +1,13 @@
 name: Data Sync: Hourly Predictions to Repo
 run-name: Syncing hourly predictions for ${{ github.ref_name }} by @${{ github.actor }} 
-
 on:
   schedule:
-    - cron: '45 * * * *' # Every hour at 45 minutes past the hour
+    - cron: '45 * * * *' # Every hour at 45 minutes past the hour (e.g., 1:45, 2:45, etc.)
   workflow_dispatch: 
 
 permissions:
   contents: write # Needed to commit and push files
-  id-token: write # Needed for WIF authentication
+  id-token: write # Needed for Workload Identity Federation (WIF)
 
 # Inherit variables from your existing setup
 env:
@@ -23,7 +22,7 @@ jobs:
   sync_data:
     runs-on: ubuntu-latest
     steps:
-      # --- SETUP ---
+      # --- 1. SETUP & AUTHENTICATION ---
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -37,44 +36,51 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
-      # 2. DOWNLOAD AND RENAME DATA
+      # --- 2. DOWNLOAD AND RENAME DATA ---
       - name: Find Latest Run ID, Download, and Rename File
+        id: download_rename # <-- Step ID used to reference outputs later
         shell: bash
         run: |
           set -euo pipefail
           
-          # 2a. Find the LATEST folder/run_id in GCS (the newest subdirectory)
+          # 2a. Find the LATEST folder/run_id in GCS
+          # gsutil ls -d lists directories, 'tail -1' gets the last one (newest/latest)
           LATEST_RUN_DIR=$(gsutil ls -d gs://${BUCKET_NAME}/${GCS_PREDS_PREFIX}/*/ | tail -1)
           
           # 2b. Extract the timestamp (folder name, e.g., 2025120816)
-          # The sed command removes the GCS path elements and the trailing slash
           LATEST_RUN_ID=$(echo "$LATEST_RUN_DIR" | sed -E "s|gs://${BUCKET_NAME}/${GCS_PREDS_PREFIX}/||; s|/||")
+
+          # 2c. Define file paths and save variables for the next step (critical for reliability)
+          LOCAL_FILENAME="$LATEST_RUN_ID-preds.csv"
+          GCS_SOURCE_FILE="${{ env.GCS_PREDS_PREFIX }}/$LATEST_RUN_ID/preds.csv"
+          LOCAL_TARGET_FILE="${{ env.OUTPUT_DIR }}/$LOCAL_FILENAME"
+          
+          # Write the variables to GITHUB_OUTPUT for the next step to consume
+          echo "run_id=$LATEST_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "filename=$LOCAL_FILENAME" >> "$GITHUB_OUTPUT"
           
           echo "Detected latest run ID: $LATEST_RUN_ID"
-          echo "LATEST_RUN_ID=$LATEST_RUN_ID" >> "$GITHUB_ENV" # Save for commit message
-
-          # 2c. Define paths
-          GCS_SOURCE_FILE="${{ env.GCS_PREDS_PREFIX }}/$LATEST_RUN_ID/preds.csv"
-          LOCAL_TARGET_FILE="${{ env.OUTPUT_DIR }}/$LATEST_RUN_ID-preds.csv" # New name includes the ID
           
-          # Create local folder if it doesn't exist
+          # 2d. Create local folder and copy the file
           mkdir -p ${{ env.OUTPUT_DIR }} 
-          
-          # 2d. Copy from GCS to the new local, timestamped filename
           gsutil cp gs://${BUCKET_NAME}/${GCS_SOURCE_FILE} ${LOCAL_TARGET_FILE}
           
           echo "Successfully copied: gs://${BUCKET_NAME}/${GCS_SOURCE_FILE} to ${LOCAL_TARGET_FILE}"
 
-      # 3. COMMIT AND PUSH
+      # --- 3. COMMIT AND PUSH ---
       - name: Commit and Push New Timestamped File
-        if: success()
+        if: success() # Only run if the download step passed
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           
-          # Stage the newly created timestamped file using the ID saved in GITHUB_ENV
-          git add ${{ env.OUTPUT_DIR }}/${{ env.LATEST_RUN_ID }}-preds.csv
+          # Retrieve variables from the previous step's output
+          FILENAME="${{ steps.download_rename.outputs.filename }}"
+          RUN_ID="${{ steps.download_rename.outputs.run_id }}"
+          
+          # Stage the newly created timestamped file
+          git add ${{ env.OUTPUT_DIR }}/$FILENAME
           
           # Commit using the extracted ID
-          git commit -m "🤖 Data Sync: Add hourly prediction file for run ${{ env.LATEST_RUN_ID }}"
+          git commit -m "🤖 Data Sync: Add hourly prediction file for run $RUN_ID"
           git push
