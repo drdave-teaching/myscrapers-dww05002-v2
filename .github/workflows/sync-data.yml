@@ -1,7 +1,6 @@
-name: Data Sync Hourly Predictions to Repo
-run-name: Syncing hourly predictions for ${{ github.ref_name }} by @${{ github.actor }}
+name: Data Sync: Hourly Predictions to Repo
+run-name: Syncing hourly predictions for ${{ github.ref_name }} by @${{ github.actor }} 
 
-# 1. TRIGGER (Runs hourly at :45 past the hour)
 on:
   schedule:
     - cron: '45 * * * *' # Every hour at 45 minutes past the hour
@@ -40,19 +39,15 @@ jobs:
 
       # 2. DOWNLOAD AND RENAME DATA
       - name: Find Latest Run ID, Download, and Rename File
-        id: download_rename
         shell: bash
         run: |
           set -euo pipefail
           
           # 2a. Find the LATEST folder/run_id in GCS (the newest subdirectory)
-          # gsutil ls -d lists directories, 'tail -1' gets the last one (latest)
-          # The result is like: gs://myscrapers-dww05002-v2/structured/preds/2025120816/
           LATEST_RUN_DIR=$(gsutil ls -d gs://${BUCKET_NAME}/${GCS_PREDS_PREFIX}/*/ | tail -1)
           
-          # 2b. Extract the timestamp (folder name)
-          # The sed command removes everything up to 'preds/' and the final slash
-          # Result is just the run ID, e.g., 2025120816
+          # 2b. Extract the timestamp (folder name, e.g., 2025120816)
+          # The sed command removes the GCS path elements and the trailing slash
           LATEST_RUN_ID=$(echo "$LATEST_RUN_DIR" | sed -E "s|gs://${BUCKET_NAME}/${GCS_PREDS_PREFIX}/||; s|/||")
           
           echo "Detected latest run ID: $LATEST_RUN_ID"
@@ -72,14 +67,14 @@ jobs:
 
       # 3. COMMIT AND PUSH
       - name: Commit and Push New Timestamped File
-        if: success() # Only run if the download step was successful
+        if: success()
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           
-          # Stage the newly created timestamped file
+          # Stage the newly created timestamped file using the ID saved in GITHUB_ENV
           git add ${{ env.OUTPUT_DIR }}/${{ env.LATEST_RUN_ID }}-preds.csv
           
-          # Commit using the extracted ID from the GITHUB_ENV variable
+          # Commit using the extracted ID
           git commit -m "🤖 Data Sync: Add hourly prediction file for run ${{ env.LATEST_RUN_ID }}"
           git push
