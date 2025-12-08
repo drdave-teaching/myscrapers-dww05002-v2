@@ -1,4 +1,4 @@
-name: Data Sync: Hourly Predictions to Repo
+name: Data Sync Hourly Predictions to Repo
 run-name: Syncing hourly predictions for ${{ github.ref_name }} by @${{ github.actor }}
 
 # 1. TRIGGER (Runs hourly at :45 past the hour)
