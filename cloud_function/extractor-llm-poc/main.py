@@ -181,7 +181,7 @@ def _vertex_extract_fields(raw_text: str) -> dict:
         "If a value is not present, use null. "
         "Rules: integers for price/year/mileage; price in USD; mileage in miles; "
         "do not infer values not explicitly present; do not add extra keys."
-        "transmission can be manual or automatic."
+        "the transmission can be manual or automatic, or if not listed, write null."
     )
 
     # FIX: Combine instruction and text into one prompt string (SDK compatibility)
