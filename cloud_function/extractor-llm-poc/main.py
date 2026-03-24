@@ -168,10 +168,11 @@ def _vertex_extract_fields(raw_text: str) -> dict:
             "year": {"type": "integer", "nullable": True},
             "make": {"type": "string", "nullable": True},
             "model": {"type": "string", "nullable": True},
+            "color": {"type": "string", "nullable": True},
             "transmission": {"type": "string", "nullable": True},
             "mileage": {"type": "integer", "nullable": True},
         },
-        "required": ["price", "year", "make", "model", "transmission", "mileage"]
+        "required": ["price", "year", "make", "model", "color", "transmission", "mileage"]
     }
 
     # System instruction (will be prepended to the prompt)
@@ -181,7 +182,8 @@ def _vertex_extract_fields(raw_text: str) -> dict:
         "If a value is not present, use null. "
         "Rules: integers for price/year/mileage; price in USD; mileage in miles; "
         "the transmission can be manual or automatic, or if not listed, write null."
-        "do not infer values not explicitly present; do not add extra keys."
+        "Color is the exterior car color. Examples are silver, black, red, green, etc."
+        "Do not infer values not explicitly present; do not add extra keys."
     )
 
     # FIX: Combine instruction and text into one prompt string (SDK compatibility)
@@ -321,6 +323,7 @@ def llm_extract_http(request: Request):
                 "model": parsed.get("model"),
                 "mileage": parsed.get("mileage"),
                 "transmission": parsed.get("transmission"),
+                "color": parsed.get("color"),
                 "llm_provider": "vertex",
                 "llm_model": LLM_MODEL,
                 "llm_ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
