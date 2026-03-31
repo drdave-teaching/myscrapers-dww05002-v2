@@ -9,9 +9,10 @@ from typing import Dict, Iterable
 from flask import Request, jsonify
 from google.cloud import storage
 
-# -------------------- ENV --------------------
+# -------------------- ENV & CONFIG --------------------
 BUCKET_NAME        = os.getenv("GCS_BUCKET")                         # REQUIRED
 STRUCTURED_PREFIX  = os.getenv("STRUCTURED_PREFIX", "structured")    # e.g., "structured"
+OUTPUT_FILENAME    = "listings_master_llm_v1.csv"                    # <--- CHANGE THIS NAME HERE
 
 storage_client = storage.Client()
 
@@ -25,6 +26,8 @@ CSV_COLUMNS = [
     "price", "year", "make", "model", "mileage", "transmission", "color",
     "source_txt"
 ]
+
+# -------------------- HELPERS --------------------
 
 def _list_run_ids(bucket: str, structured_prefix: str) -> list[str]:
     """Lists all run_id= folders in the bucket prefix."""
@@ -100,35 +103,36 @@ def _get_existing_master_data(bucket_name: str, key: str) -> Dict[str, Dict]:
             if pid:
                 data[pid] = row
     except Exception:
-        pass # If file is corrupt or empty, start fresh
+        pass 
     return data
+
+# -------------------- MAIN FUNCTION --------------------
 
 def materialize_http(request: Request):
     """
     HTTP POST:
-    1. Filter runs for only the last ~75 minutes (prev hour + buffer).
-    2. Load existing master CSV to deduplicate against.
-    3. Overwrite duplicates with the latest run data.
-    4. Save the merged result back to GCS.
+    1. Filter runs for only the last ~75 minutes.
+    2. Load existing master CSV (defined by OUTPUT_FILENAME).
+    3. Overwrite/Deduplicate with latest run data.
+    4. Save merged result back to GCS.
     """
     try:
         if not BUCKET_NAME:
             return jsonify({"ok": False, "error": "missing GCS_BUCKET env"}), 500
 
-        # 1. Get recent runs to save time/memory
+        # 1. Look back 75 mins to ensure we catch the previous hour's run
         all_run_ids = _list_run_ids(BUCKET_NAME, STRUCTURED_PREFIX)
-        # Look back 75 mins to ensure we don't miss a run that started at the top of the hour
         limit_time = datetime.now(timezone.utc) - timedelta(minutes=75)
         recent_runs = [r for r in all_run_ids if _run_id_to_dt(r) > limit_time]
 
         if not recent_runs:
             return jsonify({"ok": True, "message": "No new runs found in the last hour"}), 200
 
-        # 2. Load the 'Master' data we already have
-        final_key = f"{STRUCTURED_PREFIX}/datasets/listings_master_llm.csv"
+        # 2. Load the 'Master' data from our current target file
+        final_key = f"{STRUCTURED_PREFIX}/datasets/{OUTPUT_FILENAME}"
         master_records = _get_existing_master_data(BUCKET_NAME, final_key)
         
-        # 3. Add new data (Deduplicate by post_id)
+        # 3. Fetch new records and merge (Deduplicate by post_id)
         for rid in recent_runs:
             for rec in _jsonl_records_for_run(BUCKET_NAME, STRUCTURED_PREFIX, rid):
                 pid = rec.get("post_id")
@@ -136,11 +140,11 @@ def materialize_http(request: Request):
                     continue
                 
                 prev = master_records.get(pid)
-                # Logic: If post is brand new, or if this run is newer than the stored one
+                # Keep record if it's new OR if this run is newer than what's in the CSV
                 if (prev is None) or (_run_id_to_dt(rid) >= _run_id_to_dt(prev.get("run_id", ""))):
                     master_records[pid] = rec
 
-        # 4. Atomically overwrite the master CSV
+        # 4. Save the fully updated list back to GCS
         rows_written = _write_csv(master_records.values(), final_key)
 
         return jsonify({
